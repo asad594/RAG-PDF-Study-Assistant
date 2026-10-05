@@ -1,6 +1,6 @@
 """Answer generation: build a grounded prompt and ask Gemini Flash."""
 
-GENERATION_MODEL = "..."  # TODO: set from Google AI Studio docs
+# TODO: use llm.generate_text and llm.format_context for generation
 
 PROMPT_TEMPLATE = """Answer the question using ONLY the context below.
 If the answer is not in the context, say: "I could not find this in the PDF."

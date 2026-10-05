@@ -1,11 +1,11 @@
 """Quiz generation: create multiple-choice questions from retrieved chunks."""
 
-GENERATION_MODEL = "..."  # TODO: same model as generator.py (or import it)
+# TODO: use llm.generate_text and llm.format_context for generation
 
 QUIZ_PROMPT_TEMPLATE = """Using ONLY the context below, create {num_questions}
 multiple-choice questions. Return ONLY valid JSON in this format:
-[{{"question": "...", "options": ["A", "B", "C", "D"],
-   "correct_index": 0, "explanation": "..."}}]
+[{"question": "...", "options": ["A", "B", "C", "D"],
+   "correct_index": 0, "explanation": "..."}]
 
 Context:
 {context}

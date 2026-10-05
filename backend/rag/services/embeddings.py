@@ -1,6 +1,5 @@
 """Embeddings: convert text into vectors using the Gemini embedding model."""
 
-import time
 from google.genai import types
 
 from .config import (
@@ -8,21 +7,12 @@ from .config import (
     GEMINI_EMBEDDING_MODEL,
     get_gemini_client,
 )
-
-
-def _is_transient_error(err: Exception) -> bool:
-    """Check if error is transient based strictly on structured fields."""
-    return (
-        getattr(err, "code", None) in (429, 503)
-        or getattr(getattr(err, "response", None), "status_code", None) in (429, 503)
-        or getattr(err, "status", None) in ("RESOURCE_EXHAUSTED", "UNAVAILABLE")
-    )
-
+from .llm import call_with_retry
 
 
 def _embed(texts: list[str], task_type: str) -> list[list[float]]:
     """
-    Private helper to embed texts in batches with retries and exponential backoff.
+    Private helper to embed texts in batches using call_with_retry.
 
     Args:
         texts: List of strings to embed.
@@ -36,29 +26,17 @@ def _embed(texts: list[str], task_type: str) -> list[list[float]]:
 
     client = get_gemini_client()
     all_vectors: list[list[float]] = []
-    delays = [1.0, 2.0, 4.0]
-    max_retries = 3
 
     for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
         batch = texts[i : i + EMBEDDING_BATCH_SIZE]
-        response = None
 
-        for attempt in range(max_retries + 1):
-            try:
-                response = client.models.embed_content(
-                    model=GEMINI_EMBEDDING_MODEL,
-                    contents=batch,
-                    config=types.EmbedContentConfig(task_type=task_type),
-                )
-                break
-            except Exception as err:
-                if not _is_transient_error(err):
-                    raise
-                if attempt == max_retries:
-                    raise RuntimeError(
-                        f"Gemini embedding API failed after {max_retries} retries: {err}"
-                    ) from err
-                time.sleep(delays[attempt])
+        response = call_with_retry(
+            lambda: client.models.embed_content(
+                model=GEMINI_EMBEDDING_MODEL,
+                contents=batch,
+                config=types.EmbedContentConfig(task_type=task_type),
+            )
+        )
 
         if response is None or not response.embeddings or len(response.embeddings) != len(batch):
             received = len(response.embeddings) if (response and response.embeddings) else 0

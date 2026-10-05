@@ -1,8 +1,6 @@
 """Vector store: save and search chunk embeddings in ChromaDB."""
 
-CHROMA_PATH = "chroma_db"          # local folder (ignored by git)
-COLLECTION_NAME = "pdf_chunks"
-DEFAULT_TOP_K = 4
+from .config import CHROMA_PATH, COLLECTION_NAME, DEFAULT_TOP_K
 
 
 def reset_collection() -> None:

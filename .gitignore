@@ -18,3 +18,5 @@ dist/
 # OS / editor
 .DS_Store
 .vscode/
+
+backend/chroma_db/

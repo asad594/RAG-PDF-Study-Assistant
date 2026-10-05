@@ -32,6 +32,14 @@ GEMINI_GENERATION_MODEL = os.getenv("GEMINI_GENERATION_MODEL")
 # Embedding settings
 EMBEDDING_BATCH_SIZE = 100
 
+# Vector store settings
+CHROMA_PATH = Path(__file__).resolve().parent.parent.parent / "chroma_db"
+COLLECTION_NAME = "pdf_chunks"
+DEFAULT_TOP_K = 4
+
+# API retry settings
+RETRY_DELAYS = (1.0, 2.0, 4.0)
+
 
 @lru_cache(maxsize=1)
 def get_gemini_client() -> genai.Client:
