@@ -1,11 +1,17 @@
 """PDF loading: extract raw text from an uploaded PDF or file path (pypdf)."""
 
+import logging
 from pathlib import Path
 import re
 from typing import Any, BinaryIO, Union
 
 from pypdf import PdfReader
-from pypdf.errors import PyPdfError
+
+logger = logging.getLogger(__name__)
+
+
+class NoTextError(ValueError):
+    """Raised when a PDF contains no extractable text."""
 
 
 def _clean_text(text: str) -> str:
@@ -44,34 +50,47 @@ def extract_pages(source: Union[str, Path, BinaryIO, Any]) -> list[dict]:
         A list of dicts: [{"page": int (1-based), "text": str}, ...].
 
     Raises:
-        ValueError: If the file is not a valid PDF or no page has extractable text.
+        NoTextError: If no page has extractable text.
+        ValueError: If the file is encrypted, invalid, or corrupted.
     """
     # Reset stream position if source is a file-like object
     if hasattr(source, "seek"):
         source.seek(0)
 
     try:
-        reader = PdfReader(source)
-        pages = reader.pages
-        total_pages = len(pages)
-    except PyPdfError as err:
-        raise ValueError(f"Invalid or corrupted PDF file: {err}") from err
-
-    if total_pages == 0:
-        raise ValueError("The PDF contains no pages.")
-
-    extracted_pages: list[dict] = []
-    for page_num, page in enumerate(pages, start=1):
         try:
-            raw_text = page.extract_text() or ""
-        except PyPdfError as err:
-            raise ValueError(f"Failed to read page {page_num} of PDF: {err}") from err
+            reader = PdfReader(source)
+            if reader.is_encrypted:
+                raise ValueError("PDF is encrypted and password protected.")
+            pages = reader.pages
+            total_pages = len(pages)
+        except ValueError:
+            raise
+        except Exception as err:
+            logger.exception("Failed to open PDF file: %s", err)
+            raise ValueError(f"Could not read PDF: {err}") from err
 
-        cleaned = _clean_text(raw_text)
-        if cleaned:
-            extracted_pages.append({"page": page_num, "text": cleaned})
+        if total_pages == 0:
+            raise ValueError("The PDF contains no pages.")
 
-    if not extracted_pages:
-        raise ValueError("No extractable text found in the PDF (pages may be scanned or empty).")
+        extracted_pages: list[dict] = []
+        for page_num, page in enumerate(pages, start=1):
+            try:
+                raw_text = page.extract_text() or ""
+            except Exception as err:
+                logger.exception("Failed to read page %d of PDF: %s", page_num, err)
+                raise ValueError(f"Failed to read page {page_num} of PDF: {err}") from err
 
-    return extracted_pages
+            cleaned = _clean_text(raw_text)
+            if cleaned:
+                extracted_pages.append({"page": page_num, "text": cleaned})
+
+        if not extracted_pages:
+            raise NoTextError("No extractable text found in the PDF (pages may be scanned or empty).")
+
+        return extracted_pages
+    except (NoTextError, ValueError):
+        raise
+    except Exception as err:
+        logger.exception("Unexpected error while processing PDF: %s", err)
+        raise ValueError(f"Could not read PDF: {err}") from err

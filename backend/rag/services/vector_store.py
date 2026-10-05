@@ -1,8 +1,13 @@
 """Vector store: save and search chunk embeddings in ChromaDB."""
 
+import logging
+
 import chromadb
+from chromadb.errors import NotFoundError
 
 from .config import CHROMA_PATH, COLLECTION_NAME, DEFAULT_TOP_K
+
+logger = logging.getLogger(__name__)
 
 _client = None
 
@@ -23,8 +28,11 @@ def reset_collection() -> None:
     _get_collection()
     try:
         _client.delete_collection(name=COLLECTION_NAME)
-    except (ValueError, Exception):
+    except NotFoundError:
         pass
+    except Exception as err:
+        logger.exception("Failed to delete Chroma collection '%s': %s", COLLECTION_NAME, err)
+        raise
     _get_collection()
 
 
@@ -90,10 +98,7 @@ def search(query_vector: list[float], top_k: int = DEFAULT_TOP_K) -> list[dict]:
 
 def get_chunk_count() -> int:
     """
-    Return the number of stored chunks in the collection, or 0 if empty.
+    Return the number of stored chunks in the collection.
     """
-    try:
-        collection = _get_collection()
-        return collection.count()
-    except Exception:
-        return 0
+    collection = _get_collection()
+    return collection.count()

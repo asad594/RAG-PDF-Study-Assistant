@@ -12,6 +12,10 @@ from .config import (
 )
 
 
+class GeminiBusyError(RuntimeError):
+    """Raised when Gemini API retries are exhausted due to transient errors."""
+
+
 def is_transient_error(err: Exception) -> bool:
     """Check if error is transient based strictly on structured fields."""
     return (
@@ -32,7 +36,7 @@ def call_with_retry(fn: Callable[[], Any]) -> Any:
         The result of fn().
 
     Raises:
-        RuntimeError: If all retries are exhausted on transient errors.
+        GeminiBusyError: If all retries are exhausted on transient errors.
         Exception: Re-raises any non-transient error immediately.
     """
     max_retries = len(RETRY_DELAYS)
@@ -43,7 +47,7 @@ def call_with_retry(fn: Callable[[], Any]) -> Any:
             if not is_transient_error(err):
                 raise
             if attempt == max_retries:
-                raise RuntimeError(
+                raise GeminiBusyError(
                     f"Gemini API failed after {max_retries} retries: {err}"
                 ) from err
             time.sleep(RETRY_DELAYS[attempt])
