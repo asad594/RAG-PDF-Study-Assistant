@@ -1,0 +1,9 @@
+{
+  "name": "rag-pdf-study-assistant",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k -n BACKEND,FRONTEND -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "cd backend && venv\\Scripts\\python.exe -u manage.py runserver",
+    "dev:frontend": "npm --prefix frontend run dev"
+  }
+}
