@@ -20,3 +20,12 @@ Skeleton only. Implementation in progress.
 3. `pip install -r requirements.txt`
 4. Copy `.env.example` to `.env` and add your Gemini API key
 5. `python manage.py runserver`
+
+## Run everything
+From the project root:
+1. `npm install`
+2. `npm --prefix frontend install`
+3. Set up the backend (see above)
+4. `npm run dev`
+
+Backend: http://127.0.0.1:8000 | Frontend: http://localhost:5173
