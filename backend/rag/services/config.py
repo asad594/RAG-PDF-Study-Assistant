@@ -11,6 +11,9 @@ from google import genai
 CHUNK_SIZE = 500
 CHUNK_OVERLAP = 50
 
+# Upload settings
+MAX_UPLOAD_SIZE_MB = 10
+
 
 def _load_env() -> None:
     """Load backend/.env once without side effects."""

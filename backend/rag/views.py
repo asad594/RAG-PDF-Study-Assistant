@@ -8,10 +8,16 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from .services.chunker import split_into_chunks
+from .services.config import MAX_UPLOAD_SIZE_MB
 from .services.embeddings import embed_query, embed_texts
 from .services.generator import generate_answer
 from .services.pdf_loader import extract_pages
-from .services.vector_store import reset_collection, search, store_chunks
+from .services.vector_store import (
+    get_chunk_count,
+    reset_collection,
+    search,
+    store_chunks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,15 +57,20 @@ def upload_pdf(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    max_bytes = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    if getattr(uploaded_file, "size", 0) > max_bytes:
+        return Response(
+            {"error": f"File is too large. Maximum size is {MAX_UPLOAD_SIZE_MB} MB."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    pages = []
+    chunks = []
     try:
         pages = extract_pages(uploaded_file)
         chunks = split_into_chunks(pages)
     except ValueError as exc:
         logger.warning("No readable text in PDF: %s", exc)
-        return Response(
-            {"error": "No readable text found in this PDF."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
 
     if not chunks:
         return Response(
@@ -93,14 +104,27 @@ def ask_question(request):
     Expects:
         JSON body: {"question": "..."}
     """
-    question = request.data.get("question") if request.data else None
-    if not question or not str(question).strip():
+    if not isinstance(request.data, dict):
         return Response(
             {"error": "Question is required."},
             status=status.HTTP_400_BAD_REQUEST,
         )
 
-    cleaned_question = str(question).strip()
+    raw_question = request.data.get("question")
+    if not isinstance(raw_question, str) or not raw_question.strip():
+        return Response(
+            {"error": "Question is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    cleaned_question = raw_question.strip()
+
+    if get_chunk_count() == 0:
+        return Response(
+            {"error": "Please upload a PDF first."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     try:
         query_vector = embed_query(cleaned_question)
         chunks = search(query_vector)

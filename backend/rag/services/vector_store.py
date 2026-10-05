@@ -86,3 +86,14 @@ def search(query_vector: list[float], top_k: int = DEFAULT_TOP_K) -> list[dict]:
         })
 
     return output
+
+
+def get_chunk_count() -> int:
+    """
+    Return the number of stored chunks in the collection, or 0 if empty.
+    """
+    try:
+        collection = _get_collection()
+        return collection.count()
+    except Exception:
+        return 0
