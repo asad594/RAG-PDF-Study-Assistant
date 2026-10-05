@@ -8,13 +8,19 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from .services.chunker import split_into_chunks
-from .services.config import MAX_UPLOAD_SIZE_MB
+from .services.config import (
+    MAX_UPLOAD_SIZE_MB,
+    QUIZ_DEFAULT_QUESTIONS,
+    QUIZ_MAX_QUESTIONS,
+)
 from .services.embeddings import embed_query, embed_texts
 from .services.generator import generate_answer
 from .services.llm import GeminiBusyError
 from .services.pdf_loader import NoTextError, extract_pages
+from .services.quiz_generator import QuizGenerationError, generate_quiz
 from .services.vector_store import (
     get_chunk_count,
+    get_quiz_chunks,
     reset_collection,
     search,
     store_chunks,
@@ -32,6 +38,8 @@ ERR_QUESTION_REQUIRED = "Question is required."
 ERR_UPLOAD_FIRST = "Please upload a PDF first."
 ERR_AI_BUSY = "The AI service is busy. Please try again in a few minutes."
 ERR_SERVER_ERROR = "Something went wrong on the server."
+ERR_QUIZ_COUNT = f"Number of questions must be between 1 and {QUIZ_MAX_QUESTIONS}."
+ERR_QUIZ_FAILED = "Could not generate a valid quiz. Please try again."
 
 
 def _error(message: str, http_status: int) -> Response:
@@ -42,6 +50,8 @@ def _error(message: str, http_status: int) -> Response:
 def handle_service_error(exc: Exception) -> Response:
     """Log the exception and return a clean error Response without sensitive details."""
     logger.exception("Service error occurred: %s", exc)
+    if isinstance(exc, QuizGenerationError):
+        return _error(ERR_QUIZ_FAILED, status.HTTP_500_INTERNAL_SERVER_ERROR)
     is_busy = isinstance(exc, GeminiBusyError) or (
         isinstance(exc, errors.APIError) and getattr(exc, "code", None) in (429, 503)
     )
@@ -130,5 +140,37 @@ def ask_question(request):
 
 @api_view(["POST"])
 def generate_quiz_view(request):
-    # TODO: retrieve chunks -> generate MCQs
-    return Response({"message": "quiz endpoint - not implemented yet"}, status=501)
+    """
+    Generate multiple-choice quiz questions from the stored PDF context.
+
+    Expects:
+        Optional JSON body: {"num_questions": int}
+    """
+    if not isinstance(request.data, dict):
+        return _error(ERR_QUIZ_COUNT, status.HTTP_400_BAD_REQUEST)
+
+    if "num_questions" in request.data:
+        raw_count = request.data["num_questions"]
+        if (
+            isinstance(raw_count, bool)
+            or not isinstance(raw_count, int)
+            or raw_count < 1
+            or raw_count > QUIZ_MAX_QUESTIONS
+        ):
+            return _error(ERR_QUIZ_COUNT, status.HTTP_400_BAD_REQUEST)
+        num_questions = raw_count
+    else:
+        num_questions = QUIZ_DEFAULT_QUESTIONS
+
+    try:
+        if get_chunk_count() == 0:
+            return _error(ERR_UPLOAD_FIRST, status.HTTP_400_BAD_REQUEST)
+
+        chunks = get_quiz_chunks()
+        if not chunks:
+            return _error(ERR_UPLOAD_FIRST, status.HTTP_400_BAD_REQUEST)
+
+        questions = generate_quiz(chunks, num_questions)
+        return Response({"questions": questions}, status=status.HTTP_200_OK)
+    except Exception as exc:
+        return handle_service_error(exc)

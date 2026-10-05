@@ -46,6 +46,11 @@ NOT_FOUND_MESSAGE = "I could not find this in the PDF."
 # API retry settings
 RETRY_DELAYS = (1.0, 2.0, 4.0)
 
+# Quiz settings
+QUIZ_DEFAULT_QUESTIONS = 5
+QUIZ_MAX_QUESTIONS = 10
+QUIZ_MAX_CHUNKS = 12
+
 
 
 @lru_cache(maxsize=1)

@@ -5,7 +5,12 @@ import logging
 import chromadb
 from chromadb.errors import NotFoundError
 
-from .config import CHROMA_PATH, COLLECTION_NAME, DEFAULT_TOP_K
+from .config import (
+    CHROMA_PATH,
+    COLLECTION_NAME,
+    DEFAULT_TOP_K,
+    QUIZ_MAX_CHUNKS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,3 +107,52 @@ def get_chunk_count() -> int:
     """
     collection = _get_collection()
     return collection.count()
+
+
+def _parse_chunk_id(cid: str) -> int:
+    """Extract numeric suffix from chunk id formatted as 'chunk-<number>'."""
+    parts = cid.rsplit("-", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return int(parts[1])
+    return 0
+
+
+def get_quiz_chunks(max_chunks: int = QUIZ_MAX_CHUNKS) -> list[dict]:
+    """
+    Retrieve stored chunks in document order, evenly sampled if count > max_chunks.
+
+    Args:
+        max_chunks: Maximum number of chunks to return.
+
+    Returns:
+        List of chunk dicts [{"text": str, "page": int}, ...].
+    """
+    if max_chunks <= 0:
+        return []
+
+    collection = _get_collection()
+    res = collection.get(include=["documents", "metadatas"])
+    ids = res.get("ids") or []
+    documents = res.get("documents") or []
+    metadatas = res.get("metadatas") or []
+
+    if not ids:
+        return []
+
+    indexed_chunks = []
+    for cid, doc, meta in zip(ids, documents, metadatas):
+        page = int(meta["page"]) if (meta and "page" in meta) else 0
+        indexed_chunks.append((_parse_chunk_id(cid), {"text": doc, "page": page}))
+
+    indexed_chunks.sort(key=lambda item: item[0])
+    ordered_chunks = [item[1] for item in indexed_chunks]
+
+    total = len(ordered_chunks)
+    if total <= max_chunks:
+        return ordered_chunks
+
+    if max_chunks == 1:
+        return [ordered_chunks[0]]
+
+    indices = [round(i * (total - 1) / (max_chunks - 1)) for i in range(max_chunks)]
+    return [ordered_chunks[idx] for idx in indices]
