@@ -37,8 +37,12 @@ CHROMA_PATH = Path(__file__).resolve().parent.parent.parent / "chroma_db"
 COLLECTION_NAME = "pdf_chunks"
 DEFAULT_TOP_K = 4
 
+# Generation settings
+NOT_FOUND_MESSAGE = "I could not find this in the PDF."
+
 # API retry settings
 RETRY_DELAYS = (1.0, 2.0, 4.0)
+
 
 
 @lru_cache(maxsize=1)
