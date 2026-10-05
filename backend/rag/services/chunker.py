@@ -2,10 +2,7 @@
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-try:
-    from .config import CHUNK_SIZE, CHUNK_OVERLAP
-except ImportError:
-    from config import CHUNK_SIZE, CHUNK_OVERLAP
+from .config import CHUNK_SIZE, CHUNK_OVERLAP
 
 # Create splitter once at module level using configuration from config.py
 _splitter = RecursiveCharacterTextSplitter(
