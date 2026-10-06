@@ -1,6 +1,7 @@
 """API views for the RAG PDF Study Assistant."""
 
 import logging
+import threading
 from typing import Any
 
 from google.genai import errors
@@ -28,6 +29,8 @@ from .services.vector_store import (
 )
 
 logger = logging.getLogger(__name__)
+
+_upload_lock = threading.Lock()
 
 # Error messages
 ERR_NO_FILE = "No file uploaded."
@@ -105,8 +108,9 @@ def upload_pdf(request):
     try:
         texts = [chunk["text"] for chunk in chunks]
         vectors = embed_texts(texts)
-        reset_collection()
-        store_chunks(chunks, vectors)
+        with _upload_lock:
+            reset_collection()
+            store_chunks(chunks, vectors)
     except Exception as exc:
         return handle_service_error(exc)
 

@@ -31,42 +31,6 @@ _load_env()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 
-class _LazyModel(str):
-    """Lazy string proxy that validates model configuration at first use."""
-
-    def __new__(cls, env_var: str):
-        instance = super().__new__(cls, "")
-        instance._env_var = env_var
-        return instance
-
-    def _resolve(self) -> str:
-        val = os.getenv(self._env_var)
-        if not val:
-            raise RuntimeError(f"{self._env_var} is not set in backend/.env")
-        return val
-
-    def __str__(self) -> str:
-        return self._resolve()
-
-    def __repr__(self) -> str:
-        return repr(self._resolve())
-
-    def __contains__(self, item: object) -> bool:
-        return item in self._resolve()
-
-    def __eq__(self, other: object) -> bool:
-        return self._resolve() == other
-
-    def __hash__(self) -> int:
-        return hash(self._resolve())
-
-    def __len__(self) -> int:
-        return len(self._resolve())
-
-    def __bool__(self) -> bool:
-        return bool(self._resolve())
-
-
 def get_embedding_model() -> str:
     """Return GEMINI_EMBEDDING_MODEL or raise RuntimeError if missing."""
     model = os.getenv("GEMINI_EMBEDDING_MODEL")
@@ -81,10 +45,6 @@ def get_generation_model() -> str:
     if not model:
         raise RuntimeError("GEMINI_GENERATION_MODEL is not set in backend/.env")
     return model
-
-
-GEMINI_EMBEDDING_MODEL = _LazyModel("GEMINI_EMBEDDING_MODEL")
-GEMINI_GENERATION_MODEL = _LazyModel("GEMINI_GENERATION_MODEL")
 
 # Embedding settings
 EMBEDDING_BATCH_SIZE = 100

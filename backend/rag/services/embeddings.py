@@ -4,7 +4,7 @@ from google.genai import types
 
 from .config import (
     EMBEDDING_BATCH_SIZE,
-    GEMINI_EMBEDDING_MODEL,
+    get_embedding_model,
     get_gemini_client,
 )
 from .llm import call_with_retry
@@ -25,6 +25,7 @@ def _embed(texts: list[str], task_type: str) -> list[list[float]]:
         return []
 
     client = get_gemini_client()
+    model = get_embedding_model()
     all_vectors: list[list[float]] = []
 
     for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
@@ -32,7 +33,7 @@ def _embed(texts: list[str], task_type: str) -> list[list[float]]:
 
         response = call_with_retry(
             lambda: client.models.embed_content(
-                model=GEMINI_EMBEDDING_MODEL,
+                model=model,
                 contents=batch,
                 config=types.EmbedContentConfig(task_type=task_type),
             )

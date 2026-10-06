@@ -1,8 +1,11 @@
 """Offline unit and integration tests for RAG services and endpoints."""
 
 import io
+import logging
 from pathlib import Path
 import tempfile
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -11,13 +14,15 @@ from pypdf import PdfWriter
 from rest_framework import status
 from rest_framework.test import APIClient
 
+from rag.services import vector_store
 from rag.services.config import (
     NOT_FOUND_MESSAGE,
     QUIZ_DEFAULT_QUESTIONS,
     get_embedding_model,
     get_generation_model,
 )
-from rag.services.generator import generate_answer
+from rag.services.embeddings import _embed
+from rag.services.generator import _extract_cited_pages, generate_answer
 from rag.services.llm import (
     GeminiBusyError,
     GeminiQuotaError,
@@ -25,7 +30,37 @@ from rag.services.llm import (
 )
 from rag.services.pdf_loader import ExtractedPages, extract_pages
 from rag.services.quiz_generator import QuizGenerationError
-from rag.services import vector_store
+
+
+# Global isolation: ensure ChromaDB never writes to backend/chroma_db during tests
+_module_temp_chroma = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+_orig_chroma_path = vector_store.CHROMA_PATH
+vector_store.CHROMA_PATH = Path(_module_temp_chroma.name)
+vector_store._client = None
+
+
+def tearDownModule():
+    """Restore ChromaDB path and clean up temporary directory after all tests."""
+    vector_store._client = None
+    vector_store.CHROMA_PATH = _orig_chroma_path
+    try:
+        _module_temp_chroma.cleanup()
+    except Exception:
+        pass
+
+
+class SilentTestCase(TestCase):
+    """Base test case that silences logging to keep test output clean."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        logging.disable(logging.CRITICAL)
+
+    @classmethod
+    def tearDownClass(cls):
+        logging.disable(logging.NOTSET)
+        super().tearDownClass()
 
 
 def _create_dummy_pdf(num_pages: int = 1) -> io.BytesIO:
@@ -50,7 +85,7 @@ def _create_encrypted_pdf(password: str = "secret") -> io.BytesIO:
     return buf
 
 
-class MethodNotAllowedTests(TestCase):
+class MethodNotAllowedTests(SilentTestCase):
     """Verify that GET requests to POST-only API endpoints return HTTP 405."""
 
     def setUp(self):
@@ -69,7 +104,7 @@ class MethodNotAllowedTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
 
 
-class UploadEndpointTests(TestCase):
+class UploadEndpointTests(SilentTestCase):
     """Test POST /api/upload/ endpoint."""
 
     def setUp(self):
@@ -161,8 +196,64 @@ class UploadEndpointTests(TestCase):
             self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
             mock_reset.assert_not_called()
 
+    def test_simultaneous_uploads_never_interleave_reset_and_store(self):
+        events = []
+        lock_check = []
+        active_critical_section = False
+        cs_lock = threading.Lock()
 
-class AskEndpointTests(TestCase):
+        def mock_embed(texts):
+            return [[0.1, 0.2]] * len(texts)
+
+        def mock_reset():
+            nonlocal active_critical_section
+            with cs_lock:
+                if active_critical_section:
+                    lock_check.append("INTERLEAVED")
+                active_critical_section = True
+            events.append(("reset", threading.get_ident()))
+            time.sleep(0.02)
+
+        def mock_store(chunks, vectors):
+            nonlocal active_critical_section
+            events.append(("store", threading.get_ident()))
+            time.sleep(0.02)
+            with cs_lock:
+                active_critical_section = False
+
+        pages = ExtractedPages([{"page": 1, "text": "Text"}], total_pages=1)
+        chunks = [{"page": 1, "text": "Text"}]
+
+        with patch("rag.views.extract_pages", return_value=pages), \
+             patch("rag.views.split_into_chunks", return_value=chunks), \
+             patch("rag.views.embed_texts", side_effect=mock_embed), \
+             patch("rag.views.reset_collection", side_effect=mock_reset), \
+             patch("rag.views.store_chunks", side_effect=mock_store):
+
+            def run_upload():
+                client = APIClient()
+                file = SimpleUploadedFile("doc.pdf", b"%PDF-dummy", content_type="application/pdf")
+                resp = client.post("/api/upload/", {"file": file}, format="multipart")
+                self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+            t1 = threading.Thread(target=run_upload)
+            t2 = threading.Thread(target=run_upload)
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+
+        self.assertEqual(lock_check, [], "Upload critical sections interleaved!")
+        self.assertEqual(len(events), 4)
+        self.assertEqual(events[0][0], "reset")
+        self.assertEqual(events[1][0], "store")
+        self.assertEqual(events[0][1], events[1][1])
+        self.assertEqual(events[2][0], "reset")
+        self.assertEqual(events[3][0], "store")
+        self.assertEqual(events[2][1], events[3][1])
+
+
+class AskEndpointTests(SilentTestCase):
     """Test POST /api/ask/ endpoint."""
 
     def setUp(self):
@@ -235,7 +326,7 @@ class AskEndpointTests(TestCase):
             self.assertEqual(response.data, {"error": "Something went wrong on the server."})
 
 
-class QuizEndpointTests(TestCase):
+class QuizEndpointTests(SilentTestCase):
     """Test POST /api/quiz/ endpoint."""
 
     def setUp(self):
@@ -293,7 +384,7 @@ class QuizEndpointTests(TestCase):
             self.assertEqual(response.data, {"questions": sample})
 
 
-class GeneratorSourceFilteringTests(TestCase):
+class GeneratorSourceFilteringTests(SilentTestCase):
     """Test source citation filtering in generate_answer."""
 
     def setUp(self):
@@ -317,6 +408,30 @@ class GeneratorSourceFilteringTests(TestCase):
             pages = {s["page"] for s in result["sources"]}
             self.assertEqual(pages, {1, 3})
 
+    def test_range_citation_expansion_hyphen(self):
+        with patch("rag.services.generator.generate_text", return_value="Summary in (Pages 2-3)."):
+            result = generate_answer("What is the answer?", self.chunks)
+            self.assertEqual(len(result["sources"]), 2)
+            pages = {s["page"] for s in result["sources"]}
+            self.assertEqual(pages, {2, 3})
+
+    def test_range_citation_expansion_to(self):
+        with patch("rag.services.generator.generate_text", return_value="Details in (Pages 1 to 3)."):
+            result = generate_answer("What is the answer?", self.chunks)
+            self.assertEqual(len(result["sources"]), 3)
+            pages = {s["page"] for s in result["sources"]}
+            self.assertEqual(pages, {1, 2, 3})
+
+    def test_range_citation_cap_at_50_pages(self):
+        cited = _extract_cited_pages("Refer to (Pages 1 to 100).")
+        self.assertEqual(len(cited), 50)
+        self.assertEqual(min(cited), 1)
+        self.assertEqual(max(cited), 50)
+
+    def test_range_citation_hyphen_with_spaces(self):
+        cited = _extract_cited_pages("Found in (Pages 2 - 4).")
+        self.assertEqual(cited, {2, 3, 4})
+
     def test_no_citation_fallback_returns_all_chunks(self):
         with patch("rag.services.generator.generate_text", return_value="The answer is clear with no pages."):
             result = generate_answer("What is the answer?", self.chunks)
@@ -334,7 +449,7 @@ class GeneratorSourceFilteringTests(TestCase):
             self.assertEqual(result["sources"], [])
 
 
-class CallWithRetryTests(TestCase):
+class CallWithRetryTests(SilentTestCase):
     """Test retry behavior in call_with_retry."""
 
     def test_per_day_quota_error_raises_immediately_without_retry_or_sleep(self):
@@ -344,6 +459,27 @@ class CallWithRetryTests(TestCase):
 
         with patch("time.sleep") as mock_sleep:
             with self.assertRaises(GeminiQuotaError):
+                call_with_retry(mock_fn)
+            self.assertEqual(mock_fn.call_count, 1)
+            mock_sleep.assert_not_called()
+
+    def test_normal_429_retries_and_raises_busy_error(self):
+        err = Exception("Rate limit exceeded")
+        err.code = 429
+        mock_fn = MagicMock(side_effect=err)
+
+        with patch("time.sleep") as mock_sleep:
+            with self.assertRaises(GeminiBusyError):
+                call_with_retry(mock_fn)
+            self.assertEqual(mock_fn.call_count, 4)
+            self.assertEqual(mock_sleep.call_count, 3)
+
+    def test_unstructured_429_string_not_treated_as_per_day_quota(self):
+        err = ValueError("Error with 429 and PerDay in message")
+        mock_fn = MagicMock(side_effect=err)
+
+        with patch("time.sleep") as mock_sleep:
+            with self.assertRaises(ValueError):
                 call_with_retry(mock_fn)
             self.assertEqual(mock_fn.call_count, 1)
             mock_sleep.assert_not_called()
@@ -360,7 +496,7 @@ class CallWithRetryTests(TestCase):
             self.assertEqual(mock_sleep.call_count, 3)
 
 
-class VectorStoreIsolatedTests(TestCase):
+class VectorStoreIsolatedTests(SilentTestCase):
     """Test vector store chunk ordering, sampling, and reset using a temporary directory."""
 
     def setUp(self):
@@ -380,10 +516,14 @@ class VectorStoreIsolatedTests(TestCase):
             pass
 
     def test_parse_chunk_id_invalid_logs_warning_and_returns_none(self):
-        with self.assertLogs("rag.services.vector_store", level="WARNING") as cm:
-            result = vector_store._parse_chunk_id("invalid-format")
-            self.assertIsNone(result)
-            self.assertTrue(any("Invalid chunk ID format" in msg for msg in cm.output))
+        logging.disable(logging.NOTSET)
+        try:
+            with self.assertLogs("rag.services.vector_store", level="WARNING") as cm:
+                result = vector_store._parse_chunk_id("invalid-format")
+                self.assertIsNone(result)
+                self.assertTrue(any("Invalid chunk ID format" in msg for msg in cm.output))
+        finally:
+            logging.disable(logging.CRITICAL)
 
     def test_get_quiz_chunks_ordering_sampling_and_reset(self):
         chunks = [{"page": i + 1, "text": f"Chunk text {i}"} for i in range(20)]
@@ -403,8 +543,26 @@ class VectorStoreIsolatedTests(TestCase):
         self.assertEqual(vector_store.get_chunk_count(), 0)
         self.assertEqual(vector_store.get_quiz_chunks(), [])
 
+    def test_get_quiz_chunks_large_collection_2000(self):
+        total_chunks = 2000
+        max_chunks = 12
+        chunks = [{"page": i + 1, "text": f"Chunk text {i}"} for i in range(total_chunks)]
+        vectors = [[0.01, 0.02, 0.03, 0.04] for _ in range(total_chunks)]
 
-class ConfigModelTests(TestCase):
+        vector_store.store_chunks(chunks, vectors)
+        self.assertEqual(vector_store.get_chunk_count(), total_chunks)
+
+        quiz_chunks = vector_store.get_quiz_chunks(max_chunks=max_chunks)
+        self.assertEqual(len(quiz_chunks), max_chunks)
+        pages = [c["page"] for c in quiz_chunks]
+        self.assertEqual(pages, sorted(pages))
+        self.assertEqual(pages[0], 1)
+        self.assertEqual(pages[-1], 2000)
+        self.assertEqual(quiz_chunks[0]["text"], "Chunk text 0")
+        self.assertEqual(quiz_chunks[-1]["text"], "Chunk text 1999")
+
+
+class ConfigModelTests(SilentTestCase):
     """Test model retrieval helpers in config."""
 
     def test_missing_generation_model_raises_runtime_error(self):
@@ -418,3 +576,28 @@ class ConfigModelTests(TestCase):
             with self.assertRaises(RuntimeError) as cm:
                 get_embedding_model()
             self.assertIn("GEMINI_EMBEDDING_MODEL", str(cm.exception))
+
+    def test_get_embedding_model_returns_exact_str(self):
+        with patch.dict("os.environ", {"GEMINI_EMBEDDING_MODEL": "text-embedding-004"}):
+            model = get_embedding_model()
+            self.assertEqual(model, "text-embedding-004")
+            self.assertIs(type(model), str)
+
+    def test_embed_passes_non_empty_str_model_to_client(self):
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_emb = MagicMock()
+        mock_emb.values = [0.1, 0.2]
+        mock_response.embeddings = [mock_emb]
+        mock_client.models.embed_content.return_value = mock_response
+
+        with patch("rag.services.embeddings.get_gemini_client", return_value=mock_client), \
+             patch("rag.services.embeddings.get_embedding_model", return_value="text-embedding-004"):
+            vectors = _embed(["sample text"], task_type="RETRIEVAL_DOCUMENT")
+            self.assertEqual(vectors, [[0.1, 0.2]])
+            mock_client.models.embed_content.assert_called_once()
+            _, kwargs = mock_client.models.embed_content.call_args
+            model_arg = kwargs.get("model")
+            self.assertIs(type(model_arg), str)
+            self.assertTrue(len(model_arg) > 0)
+            self.assertEqual(model_arg, "text-embedding-004")

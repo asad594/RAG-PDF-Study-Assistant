@@ -30,12 +30,23 @@ def build_prompt(question: str, chunks: list[dict]) -> str:
 
 
 def _extract_cited_pages(text: str) -> set[int]:
-    """Parse page numbers cited like '(Page 6)' or '(Pages 2, 3)' (case-insensitive)."""
+    """Parse page numbers cited like '(Page 6)', '(Pages 2, 3)', '(Pages 2-3)', or '(Pages 2 to 4)'."""
     cited: set[int] = set()
     matches = re.findall(r"\(pages?\s+([^)]+)\)", text, flags=re.IGNORECASE)
     for match in matches:
-        for num_str in re.findall(r"\b\d+\b", match):
-            cited.add(int(num_str))
+        for m in re.finditer(r"(\d+)\s*(?:[-–—]|\bto\b)\s*(\d+)|(\d+)", match, flags=re.IGNORECASE):
+            if m.group(1) is not None and m.group(2) is not None:
+                start = int(m.group(1))
+                end = int(m.group(2))
+                if start <= end:
+                    count = min(end - start + 1, 50)
+                    for p in range(start, start + count):
+                        cited.add(p)
+                else:
+                    cited.add(start)
+                    cited.add(end)
+            elif m.group(3) is not None:
+                cited.add(int(m.group(3)))
     return cited
 
 

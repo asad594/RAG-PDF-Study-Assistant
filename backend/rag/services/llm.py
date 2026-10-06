@@ -27,8 +27,6 @@ def _is_per_day_quota_error(err: Exception) -> bool:
     )
     status = getattr(err, "status", None)
     is_429 = code == 429 or status == "RESOURCE_EXHAUSTED"
-    if not is_429 and "429" in str(err):
-        is_429 = True
     err_str = f"{err} {getattr(err, 'message', '')}"
     return is_429 and "PerDay" in err_str
 

@@ -132,31 +132,45 @@ def get_quiz_chunks(max_chunks: int = QUIZ_MAX_CHUNKS) -> list[dict]:
         return []
 
     collection = _get_collection()
-    res = collection.get(include=["documents", "metadatas"])
-    ids = res.get("ids") or []
-    documents = res.get("documents") or []
-    metadatas = res.get("metadatas") or []
 
+    # Step 1: Read only IDs without loading documents/metadatas into memory
+    res = collection.get(include=[])
+    ids = res.get("ids") or []
     if not ids:
         return []
 
-    indexed_chunks = []
-    for cid, doc, meta in zip(ids, documents, metadatas):
-        parsed_id = _parse_chunk_id(cid)
-        if parsed_id is None:
-            continue
-        page = int(meta["page"]) if (meta and "page" in meta) else 0
-        indexed_chunks.append((parsed_id, {"text": doc, "page": page}))
+    parsed_items = []
+    for cid in ids:
+        pid = _parse_chunk_id(cid)
+        if pid is not None:
+            parsed_items.append((pid, cid))
 
-    indexed_chunks.sort(key=lambda item: item[0])
-    ordered_chunks = [item[1] for item in indexed_chunks]
+    if not parsed_items:
+        return []
 
-    total = len(ordered_chunks)
+    parsed_items.sort(key=lambda item: item[0])
+    total = len(parsed_items)
+
     if total <= max_chunks:
-        return ordered_chunks
+        chosen_items = parsed_items
+    elif max_chunks == 1:
+        chosen_items = [parsed_items[0]]
+    else:
+        indices = [round(i * (total - 1) / (max_chunks - 1)) for i in range(max_chunks)]
+        chosen_items = [parsed_items[idx] for idx in indices]
 
-    if max_chunks == 1:
-        return [ordered_chunks[0]]
+    chosen_ids = [item[1] for item in chosen_items]
 
-    indices = [round(i * (total - 1) / (max_chunks - 1)) for i in range(max_chunks)]
-    return [ordered_chunks[idx] for idx in indices]
+    # Step 2: Retrieve only the chosen chunks by ID
+    res = collection.get(ids=chosen_ids, include=["documents", "metadatas"])
+    res_ids = res.get("ids") or []
+    documents = res.get("documents") or []
+    metadatas = res.get("metadatas") or []
+
+    data_by_id: dict[str, dict] = {}
+    for cid, doc, meta in zip(res_ids, documents, metadatas):
+        page = int(meta["page"]) if (meta and "page" in meta) else 0
+        data_by_id[cid] = {"text": doc, "page": page}
+
+    # Return in document order matching chosen_ids
+    return [data_by_id[cid] for cid in chosen_ids if cid in data_by_id]

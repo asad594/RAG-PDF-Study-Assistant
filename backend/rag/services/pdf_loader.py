@@ -22,20 +22,6 @@ class ExtractedPages(list):
         self.total_pages = total_pages
 
 
-def get_pdf_page_count(source: Union[str, Path, BinaryIO, Any]) -> int:
-    """Return the total number of pages in a PDF file."""
-    if hasattr(source, "seek"):
-        source.seek(0)
-    reader = PdfReader(source)
-    if reader.is_encrypted:
-        try:
-            if not reader.decrypt(""):
-                raise ValueError("PDF is encrypted and password protected.")
-        except Exception as exc:
-            raise ValueError(f"Could not read PDF: {exc}") from exc
-    return len(reader.pages)
-
-
 def _clean_text(text: str) -> str:
     """
     Normalize whitespace, strip, and fix simple hyphenated line breaks.
