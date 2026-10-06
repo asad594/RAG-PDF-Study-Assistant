@@ -6,14 +6,31 @@ from typing import Any, Callable
 from google.genai import types
 
 from .config import (
-    GEMINI_GENERATION_MODEL,
     RETRY_DELAYS,
     get_gemini_client,
+    get_generation_model,
 )
 
 
 class GeminiBusyError(RuntimeError):
     """Raised when Gemini API retries are exhausted due to transient errors."""
+
+
+class GeminiQuotaError(GeminiBusyError):
+    """Raised when Gemini API daily quota limit is reached."""
+
+
+def _is_per_day_quota_error(err: Exception) -> bool:
+    """Check if error is a 429 daily quota error."""
+    code = getattr(err, "code", None) or getattr(
+        getattr(err, "response", None), "status_code", None
+    )
+    status = getattr(err, "status", None)
+    is_429 = code == 429 or status == "RESOURCE_EXHAUSTED"
+    if not is_429 and "429" in str(err):
+        is_429 = True
+    err_str = f"{err} {getattr(err, 'message', '')}"
+    return is_429 and "PerDay" in err_str
 
 
 def is_transient_error(err: Exception) -> bool:
@@ -36,6 +53,7 @@ def call_with_retry(fn: Callable[[], Any]) -> Any:
         The result of fn().
 
     Raises:
+        GeminiQuotaError: Immediately on daily quota 429 error without retry.
         GeminiBusyError: If all retries are exhausted on transient errors.
         Exception: Re-raises any non-transient error immediately.
     """
@@ -44,6 +62,10 @@ def call_with_retry(fn: Callable[[], Any]) -> Any:
         try:
             return fn()
         except Exception as err:
+            if _is_per_day_quota_error(err):
+                raise GeminiQuotaError(
+                    "Gemini API daily quota limit reached."
+                ) from err
             if not is_transient_error(err):
                 raise
             if attempt == max_retries:
@@ -68,6 +90,7 @@ def generate_text(prompt: str, json_mode: bool = False) -> str:
         RuntimeError: If the model returns an empty or None response.
     """
     client = get_gemini_client()
+    model = get_generation_model()
     config = (
         types.GenerateContentConfig(response_mime_type="application/json")
         if json_mode
@@ -77,12 +100,12 @@ def generate_text(prompt: str, json_mode: bool = False) -> str:
     def _call():
         if config is not None:
             return client.models.generate_content(
-                model=GEMINI_GENERATION_MODEL,
+                model=model,
                 contents=prompt,
                 config=config,
             )
         return client.models.generate_content(
-            model=GEMINI_GENERATION_MODEL,
+            model=model,
             contents=prompt,
         )
 

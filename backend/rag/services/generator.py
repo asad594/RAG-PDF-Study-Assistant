@@ -1,5 +1,7 @@
 """Answer generation: build a grounded prompt and ask Gemini Flash."""
 
+import re
+
 from .config import NOT_FOUND_MESSAGE
 from .llm import format_context, generate_text
 
@@ -27,10 +29,19 @@ def build_prompt(question: str, chunks: list[dict]) -> str:
     )
 
 
+def _extract_cited_pages(text: str) -> set[int]:
+    """Parse page numbers cited like '(Page 6)' or '(Pages 2, 3)' (case-insensitive)."""
+    cited: set[int] = set()
+    matches = re.findall(r"\(pages?\s+([^)]+)\)", text, flags=re.IGNORECASE)
+    for match in matches:
+        for num_str in re.findall(r"\b\d+\b", match):
+            cited.add(int(num_str))
+    return cited
+
+
 def generate_answer(
     question: str,
     chunks: list[dict] | None = None,
-    context_chunks: list[dict] | None = None,
 ) -> dict:
     """
     Answer the question using ONLY the retrieved chunks.
@@ -38,39 +49,41 @@ def generate_answer(
     Args:
         question: The user's question.
         chunks: List of chunk dicts ({"text": str, "page": int}).
-        context_chunks: Optional alias for chunks.
 
     Returns:
         Dict with "answer" (str) and "sources" (list of chunk dicts).
     """
-    input_chunks = chunks if chunks is not None else context_chunks
-    if not input_chunks or not question or not question.strip():
+    if not chunks or not question or not question.strip():
         return {
             "answer": NOT_FOUND_MESSAGE,
             "sources": [],
         }
 
-    prompt = build_prompt(question, input_chunks)
+    prompt = build_prompt(question, chunks)
     response_text = generate_text(prompt)
     answer = response_text.strip()
 
-    if answer == NOT_FOUND_MESSAGE or answer.strip('"\'') == NOT_FOUND_MESSAGE:
+    if answer.strip('"\'') == NOT_FOUND_MESSAGE:
         return {
             "answer": NOT_FOUND_MESSAGE,
             "sources": [],
         }
 
     seen = set()
-    unique_sources = []
-    for chunk in input_chunks:
+    all_sources = []
+    for chunk in chunks:
         page = int(chunk.get("page", 0))
         text = chunk.get("text", "")
         key = (page, text)
         if key not in seen:
             seen.add(key)
-            unique_sources.append({"page": page, "text": text})
+            all_sources.append({"page": page, "text": text})
+
+    cited_pages = _extract_cited_pages(answer)
+    filtered_sources = [s for s in all_sources if s["page"] in cited_pages]
+    sources = filtered_sources if filtered_sources else all_sources
 
     return {
         "answer": answer,
-        "sources": unique_sources,
+        "sources": sources,
     }

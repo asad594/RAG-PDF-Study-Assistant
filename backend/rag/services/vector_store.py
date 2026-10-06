@@ -109,12 +109,13 @@ def get_chunk_count() -> int:
     return collection.count()
 
 
-def _parse_chunk_id(cid: str) -> int:
+def _parse_chunk_id(cid: str) -> int | None:
     """Extract numeric suffix from chunk id formatted as 'chunk-<number>'."""
     parts = cid.rsplit("-", 1)
     if len(parts) == 2 and parts[1].isdigit():
         return int(parts[1])
-    return 0
+    logger.warning("Invalid chunk ID format '%s'; skipping chunk.", cid)
+    return None
 
 
 def get_quiz_chunks(max_chunks: int = QUIZ_MAX_CHUNKS) -> list[dict]:
@@ -141,8 +142,11 @@ def get_quiz_chunks(max_chunks: int = QUIZ_MAX_CHUNKS) -> list[dict]:
 
     indexed_chunks = []
     for cid, doc, meta in zip(ids, documents, metadatas):
+        parsed_id = _parse_chunk_id(cid)
+        if parsed_id is None:
+            continue
         page = int(meta["page"]) if (meta and "page" in meta) else 0
-        indexed_chunks.append((_parse_chunk_id(cid), {"text": doc, "page": page}))
+        indexed_chunks.append((parsed_id, {"text": doc, "page": page}))
 
     indexed_chunks.sort(key=lambda item: item[0])
     ordered_chunks = [item[1] for item in indexed_chunks]

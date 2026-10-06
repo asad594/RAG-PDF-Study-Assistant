@@ -17,11 +17,12 @@ QUIZ_PROMPT_TEMPLATE = """Using ONLY the context below, create {num_questions} m
 
 Requirements:
 - Use ONLY facts directly mentioned in the context. Do not invent or assume any facts.
+- Do not write negatively phrased questions (no "which is NOT ...", "which of the following does not ...").
 - Each question must have exactly 4 options.
 - Exactly one option must be correct.
 - correct_index must be an integer (0, 1, 2, or 3) indicating the position of the correct option in options.
 - Options must NOT start with labels like "A)", "B)", "1.", "2.", or similar prefixes.
-- Provide a short explanation citing the page number where the information is found, e.g. (Page 2).
+- The explanation must cite the page number exactly once, only as "(Page N)" at the end, with no "According to page N" prefix.
 - Write in the same language as the context.
 - Return ONLY valid JSON matching this schema:
 [

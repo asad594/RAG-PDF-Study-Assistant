@@ -1,3 +1,420 @@
-from django.test import TestCase
+"""Offline unit and integration tests for RAG services and endpoints."""
 
-# Create your tests here.
+import io
+from pathlib import Path
+import tempfile
+from unittest.mock import MagicMock, patch
+
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase
+from pypdf import PdfWriter
+from rest_framework import status
+from rest_framework.test import APIClient
+
+from rag.services.config import (
+    NOT_FOUND_MESSAGE,
+    QUIZ_DEFAULT_QUESTIONS,
+    get_embedding_model,
+    get_generation_model,
+)
+from rag.services.generator import generate_answer
+from rag.services.llm import (
+    GeminiBusyError,
+    GeminiQuotaError,
+    call_with_retry,
+)
+from rag.services.pdf_loader import ExtractedPages, extract_pages
+from rag.services.quiz_generator import QuizGenerationError
+from rag.services import vector_store
+
+
+def _create_dummy_pdf(num_pages: int = 1) -> io.BytesIO:
+    """Create an unencrypted PDF with blank pages in memory."""
+    writer = PdfWriter()
+    for _ in range(num_pages):
+        writer.add_blank_page(width=72, height=72)
+    buf = io.BytesIO()
+    writer.write(buf)
+    buf.seek(0)
+    return buf
+
+
+def _create_encrypted_pdf(password: str = "secret") -> io.BytesIO:
+    """Create a password-encrypted PDF in memory using pypdf."""
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.encrypt(password)
+    buf = io.BytesIO()
+    writer.write(buf)
+    buf.seek(0)
+    return buf
+
+
+class MethodNotAllowedTests(TestCase):
+    """Verify that GET requests to POST-only API endpoints return HTTP 405."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_get_upload_returns_405(self):
+        response = self.client.get("/api/upload/")
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_get_ask_returns_405(self):
+        response = self.client.get("/api/ask/")
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def test_get_quiz_returns_405(self):
+        response = self.client.get("/api/quiz/")
+        self.assertEqual(response.status_code, status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+class UploadEndpointTests(TestCase):
+    """Test POST /api/upload/ endpoint."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_upload_no_file(self):
+        response = self.client.post("/api/upload/", {}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {"error": "No file uploaded."})
+
+    def test_upload_non_pdf_file(self):
+        file = SimpleUploadedFile("notes.txt", b"plain text", content_type="text/plain")
+        response = self.client.post("/api/upload/", {"file": file}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {"error": "Only PDF files are allowed."})
+
+    def test_upload_file_too_large(self):
+        big_content = b"x" * (11 * 1024 * 1024)
+        file = SimpleUploadedFile("big.pdf", big_content, content_type="application/pdf")
+        response = self.client.post("/api/upload/", {"file": file}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("File is too large", response.data.get("error", ""))
+
+    def test_upload_encrypted_pdf_built_with_pypdf(self):
+        enc_buf = _create_encrypted_pdf("my_secret_pass")
+        file = SimpleUploadedFile("locked.pdf", enc_buf.getvalue(), content_type="application/pdf")
+        response = self.client.post("/api/upload/", {"file": file}, format="multipart")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data,
+            {"error": "Could not read this PDF. It may be corrupted or password protected."},
+        )
+
+    def test_upload_empty_chunks(self):
+        pages = ExtractedPages([{"page": 1, "text": "Some text"}], total_pages=1)
+        with patch("rag.views.extract_pages", return_value=pages), \
+             patch("rag.views.split_into_chunks", return_value=[]):
+            file = SimpleUploadedFile("doc.pdf", b"%PDF-dummy", content_type="application/pdf")
+            response = self.client.post("/api/upload/", {"file": file}, format="multipart")
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertEqual(response.data, {"error": "No readable text found in this PDF."})
+
+    def test_upload_success_and_call_order(self):
+        call_order = []
+
+        def mock_embed(texts):
+            call_order.append("embed_texts")
+            return [[0.1, 0.2]] * len(texts)
+
+        def mock_reset():
+            call_order.append("reset_collection")
+
+        pages = ExtractedPages([{"page": 1, "text": "Page one text"}], total_pages=5)
+        chunks = [{"page": 1, "text": "Chunk text"}]
+
+        with patch("rag.views.extract_pages", return_value=pages), \
+             patch("rag.views.split_into_chunks", return_value=chunks), \
+             patch("rag.views.embed_texts", side_effect=mock_embed), \
+             patch("rag.views.reset_collection", side_effect=mock_reset), \
+             patch("rag.views.store_chunks") as mock_store:
+            file = SimpleUploadedFile("doc.pdf", b"%PDF-dummy", content_type="application/pdf")
+            response = self.client.post("/api/upload/", {"file": file}, format="multipart")
+
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(response.data["pages"], 5)
+            self.assertEqual(response.data["chunks"], 1)
+            self.assertEqual(call_order, ["embed_texts", "reset_collection"])
+            mock_store.assert_called_once()
+
+    def test_upload_embed_failure_does_not_reset_collection(self):
+        pages = ExtractedPages([{"page": 1, "text": "Text"}], total_pages=3)
+        chunks = [{"page": 1, "text": "Chunk text"}]
+
+        with patch("rag.views.extract_pages", return_value=pages), \
+             patch("rag.views.split_into_chunks", return_value=chunks), \
+             patch("rag.views.embed_texts", side_effect=GeminiBusyError("busy")), \
+             patch("rag.views.reset_collection") as mock_reset:
+            file = SimpleUploadedFile("doc.pdf", b"%PDF-dummy", content_type="application/pdf")
+            response = self.client.post("/api/upload/", {"file": file}, format="multipart")
+            self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+            mock_reset.assert_not_called()
+
+        with patch("rag.views.extract_pages", return_value=pages), \
+             patch("rag.views.split_into_chunks", return_value=chunks), \
+             patch("rag.views.embed_texts", side_effect=RuntimeError("unknown error")), \
+             patch("rag.views.reset_collection") as mock_reset:
+            file = SimpleUploadedFile("doc.pdf", b"%PDF-dummy", content_type="application/pdf")
+            response = self.client.post("/api/upload/", {"file": file}, format="multipart")
+            self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+            mock_reset.assert_not_called()
+
+
+class AskEndpointTests(TestCase):
+    """Test POST /api/ask/ endpoint."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_ask_blank_question(self):
+        response = self.client.post("/api/ask/", {"question": "   "}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {"error": "Question is required."})
+
+    def test_ask_list_body(self):
+        response = self.client.post("/api/ask/", ["not a dict"], format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {"error": "Question is required."})
+
+    def test_ask_int_question(self):
+        response = self.client.post("/api/ask/", {"question": 12345}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(response.data, {"error": "Question is required."})
+
+    def test_ask_empty_store_does_not_call_embed_query(self):
+        with patch("rag.views.get_chunk_count", return_value=0), \
+             patch("rag.views.embed_query") as mock_embed:
+            response = self.client.post("/api/ask/", {"question": "What is RAG?"}, format="json")
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertEqual(response.data, {"error": "Please upload a PDF first."})
+            mock_embed.assert_not_called()
+
+    def test_ask_success(self):
+        with patch("rag.views.get_chunk_count", return_value=3), \
+             patch("rag.views.embed_query", return_value=[0.1]), \
+             patch("rag.views.search", return_value=[{"page": 1, "text": "Found"}]), \
+             patch("rag.views.generate_answer", return_value={"answer": "Yes (Page 1)", "sources": [{"page": 1, "text": "Found"}]}):
+            response = self.client.post("/api/ask/", {"question": "Valid question?"}, format="json")
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(response.data["answer"], "Yes (Page 1)")
+            self.assertEqual(len(response.data["sources"]), 1)
+
+    def test_ask_gemini_busy_error(self):
+        with patch("rag.views.get_chunk_count", return_value=1), \
+             patch("rag.views.embed_query", side_effect=GeminiBusyError("busy")):
+            response = self.client.post("/api/ask/", {"question": "Question?"}, format="json")
+            self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+            self.assertEqual(
+                response.data,
+                {"error": "The AI service is busy. Please try again in a few minutes."},
+            )
+
+    def test_ask_gemini_quota_error(self):
+        with patch("rag.views.get_chunk_count", return_value=1), \
+             patch("rag.views.embed_query", side_effect=GeminiQuotaError("daily limit")):
+            response = self.client.post("/api/ask/", {"question": "Question?"}, format="json")
+            self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+            self.assertEqual(
+                response.data,
+                {"error": "Daily AI limit reached. Please try again later."},
+            )
+
+    def test_ask_runtime_error(self):
+        with patch("rag.views.get_chunk_count", return_value=1), \
+             patch("rag.views.embed_query", side_effect=RuntimeError("unexpected")):
+            response = self.client.post("/api/ask/", {"question": "Question?"}, format="json")
+            self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+            self.assertEqual(response.data, {"error": "Something went wrong on the server."})
+
+    def test_ask_get_chunk_count_error(self):
+        with patch("rag.views.get_chunk_count", side_effect=Exception("Database error")):
+            response = self.client.post("/api/ask/", {"question": "Question?"}, format="json")
+            self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+            self.assertEqual(response.data, {"error": "Something went wrong on the server."})
+
+
+class QuizEndpointTests(TestCase):
+    """Test POST /api/quiz/ endpoint."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def test_quiz_default_count(self):
+        sample_questions = [
+            {"question": "Q1", "options": ["A", "B", "C", "D"], "correct_index": 0, "explanation": "(Page 1)"}
+        ]
+        with patch("rag.views.get_quiz_chunks", return_value=[{"page": 1, "text": "t"}]), \
+             patch("rag.views.generate_quiz", return_value=sample_questions) as mock_gen:
+            response = self.client.post("/api/quiz/", {}, format="json")
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            mock_gen.assert_called_once_with([{"page": 1, "text": "t"}], QUIZ_DEFAULT_QUESTIONS)
+
+    def test_quiz_invalid_counts_do_not_call_generate_quiz(self):
+        invalid_values = [0, 11, "5", True, [5]]
+        for val in invalid_values:
+            with patch("rag.views.generate_quiz") as mock_gen:
+                response = self.client.post("/api/quiz/", {"num_questions": val}, format="json")
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertEqual(
+                    response.data,
+                    {"error": "Number of questions must be between 1 and 10."},
+                )
+                mock_gen.assert_not_called()
+
+    def test_quiz_non_dict_body(self):
+        response = self.client.post("/api/quiz/", ["not-dict"], format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data,
+            {"error": "Number of questions must be between 1 and 10."},
+        )
+
+    def test_quiz_empty_store(self):
+        with patch("rag.views.get_quiz_chunks", return_value=[]):
+            response = self.client.post("/api/quiz/", {"num_questions": 3}, format="json")
+            self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+            self.assertEqual(response.data, {"error": "Please upload a PDF first."})
+
+    def test_quiz_generation_error(self):
+        with patch("rag.views.get_quiz_chunks", return_value=[{"page": 1, "text": "t"}]), \
+             patch("rag.views.generate_quiz", side_effect=QuizGenerationError("parse error")):
+            response = self.client.post("/api/quiz/", {"num_questions": 3}, format="json")
+            self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+            self.assertEqual(response.data, {"error": "Could not generate a valid quiz. Please try again."})
+
+    def test_quiz_success(self):
+        sample = [{"question": "Q1", "options": ["a", "b", "c", "d"], "correct_index": 1, "explanation": "(Page 2)"}]
+        with patch("rag.views.get_quiz_chunks", return_value=[{"page": 2, "text": "t"}]), \
+             patch("rag.views.generate_quiz", return_value=sample):
+            response = self.client.post("/api/quiz/", {"num_questions": 1}, format="json")
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertEqual(response.data, {"questions": sample})
+
+
+class GeneratorSourceFilteringTests(TestCase):
+    """Test source citation filtering in generate_answer."""
+
+    def setUp(self):
+        self.chunks = [
+            {"page": 1, "text": "Page one details."},
+            {"page": 2, "text": "Page two details."},
+            {"page": 3, "text": "Page three details."},
+        ]
+
+    def test_single_cited_page(self):
+        with patch("rag.services.generator.generate_text", return_value="The answer is 42 (Page 2)."):
+            result = generate_answer("What is the answer?", self.chunks)
+            self.assertEqual(result["answer"], "The answer is 42 (Page 2).")
+            self.assertEqual(len(result["sources"]), 1)
+            self.assertEqual(result["sources"][0]["page"], 2)
+
+    def test_multiple_cited_pages(self):
+        with patch("rag.services.generator.generate_text", return_value="Found in (Pages 1, 3)."):
+            result = generate_answer("What is the answer?", self.chunks)
+            self.assertEqual(len(result["sources"]), 2)
+            pages = {s["page"] for s in result["sources"]}
+            self.assertEqual(pages, {1, 3})
+
+    def test_no_citation_fallback_returns_all_chunks(self):
+        with patch("rag.services.generator.generate_text", return_value="The answer is clear with no pages."):
+            result = generate_answer("What is the answer?", self.chunks)
+            self.assertEqual(len(result["sources"]), 3)
+
+    def test_not_found_returns_empty_sources(self):
+        with patch("rag.services.generator.generate_text", return_value=NOT_FOUND_MESSAGE):
+            result = generate_answer("What is the answer?", self.chunks)
+            self.assertEqual(result["answer"], NOT_FOUND_MESSAGE)
+            self.assertEqual(result["sources"], [])
+
+        with patch("rag.services.generator.generate_text", return_value=f'"{NOT_FOUND_MESSAGE}"'):
+            result = generate_answer("What is the answer?", self.chunks)
+            self.assertEqual(result["answer"], NOT_FOUND_MESSAGE)
+            self.assertEqual(result["sources"], [])
+
+
+class CallWithRetryTests(TestCase):
+    """Test retry behavior in call_with_retry."""
+
+    def test_per_day_quota_error_raises_immediately_without_retry_or_sleep(self):
+        err = Exception("GenerateRequestsPerDayPerProjectPerModel quota reached")
+        err.code = 429
+        mock_fn = MagicMock(side_effect=err)
+
+        with patch("time.sleep") as mock_sleep:
+            with self.assertRaises(GeminiQuotaError):
+                call_with_retry(mock_fn)
+            self.assertEqual(mock_fn.call_count, 1)
+            mock_sleep.assert_not_called()
+
+    def test_transient_error_retries_and_raises_busy_error(self):
+        err = Exception("Temporary backend glitch")
+        err.code = 503
+        mock_fn = MagicMock(side_effect=err)
+
+        with patch("time.sleep") as mock_sleep:
+            with self.assertRaises(GeminiBusyError):
+                call_with_retry(mock_fn)
+            self.assertEqual(mock_fn.call_count, 4)
+            self.assertEqual(mock_sleep.call_count, 3)
+
+
+class VectorStoreIsolatedTests(TestCase):
+    """Test vector store chunk ordering, sampling, and reset using a temporary directory."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.orig_chroma_path = vector_store.CHROMA_PATH
+        self.orig_client = vector_store._client
+
+        vector_store.CHROMA_PATH = Path(self.temp_dir.name)
+        vector_store._client = None
+
+    def tearDown(self):
+        vector_store._client = None
+        vector_store.CHROMA_PATH = self.orig_chroma_path
+        try:
+            self.temp_dir.cleanup()
+        except Exception:
+            pass
+
+    def test_parse_chunk_id_invalid_logs_warning_and_returns_none(self):
+        with self.assertLogs("rag.services.vector_store", level="WARNING") as cm:
+            result = vector_store._parse_chunk_id("invalid-format")
+            self.assertIsNone(result)
+            self.assertTrue(any("Invalid chunk ID format" in msg for msg in cm.output))
+
+    def test_get_quiz_chunks_ordering_sampling_and_reset(self):
+        chunks = [{"page": i + 1, "text": f"Chunk text {i}"} for i in range(20)]
+        vectors = [[float(i) * 0.05] * 4 for i in range(20)]
+
+        vector_store.store_chunks(chunks, vectors)
+        self.assertEqual(vector_store.get_chunk_count(), 20)
+
+        quiz_chunks = vector_store.get_quiz_chunks(max_chunks=5)
+        self.assertEqual(len(quiz_chunks), 5)
+        pages = [c["page"] for c in quiz_chunks]
+        self.assertEqual(pages, sorted(pages))
+        self.assertEqual(pages[0], 1)
+        self.assertEqual(pages[-1], 20)
+
+        vector_store.reset_collection()
+        self.assertEqual(vector_store.get_chunk_count(), 0)
+        self.assertEqual(vector_store.get_quiz_chunks(), [])
+
+
+class ConfigModelTests(TestCase):
+    """Test model retrieval helpers in config."""
+
+    def test_missing_generation_model_raises_runtime_error(self):
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(RuntimeError) as cm:
+                get_generation_model()
+            self.assertIn("GEMINI_GENERATION_MODEL", str(cm.exception))
+
+    def test_missing_embedding_model_raises_runtime_error(self):
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(RuntimeError) as cm:
+                get_embedding_model()
+            self.assertIn("GEMINI_EMBEDDING_MODEL", str(cm.exception))

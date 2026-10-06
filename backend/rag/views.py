@@ -1,6 +1,7 @@
 """API views for the RAG PDF Study Assistant."""
 
 import logging
+from typing import Any
 
 from google.genai import errors
 from rest_framework import status
@@ -15,7 +16,7 @@ from .services.config import (
 )
 from .services.embeddings import embed_query, embed_texts
 from .services.generator import generate_answer
-from .services.llm import GeminiBusyError
+from .services.llm import GeminiBusyError, GeminiQuotaError
 from .services.pdf_loader import NoTextError, extract_pages
 from .services.quiz_generator import QuizGenerationError, generate_quiz
 from .services.vector_store import (
@@ -37,6 +38,7 @@ ERR_CANNOT_READ_PDF = "Could not read this PDF. It may be corrupted or password 
 ERR_QUESTION_REQUIRED = "Question is required."
 ERR_UPLOAD_FIRST = "Please upload a PDF first."
 ERR_AI_BUSY = "The AI service is busy. Please try again in a few minutes."
+ERR_AI_QUOTA = "Daily AI limit reached. Please try again later."
 ERR_SERVER_ERROR = "Something went wrong on the server."
 ERR_QUIZ_COUNT = f"Number of questions must be between 1 and {QUIZ_MAX_QUESTIONS}."
 ERR_QUIZ_FAILED = "Could not generate a valid quiz. Please try again."
@@ -47,11 +49,20 @@ def _error(message: str, http_status: int) -> Response:
     return Response({"error": message}, status=http_status)
 
 
+def _ensure_dict_data(data: Any, error_message: str) -> Response | None:
+    """Validate that request data is a dictionary."""
+    if not isinstance(data, dict):
+        return _error(error_message, status.HTTP_400_BAD_REQUEST)
+    return None
+
+
 def handle_service_error(exc: Exception) -> Response:
     """Log the exception and return a clean error Response without sensitive details."""
     logger.exception("Service error occurred: %s", exc)
     if isinstance(exc, QuizGenerationError):
         return _error(ERR_QUIZ_FAILED, status.HTTP_500_INTERNAL_SERVER_ERROR)
+    if isinstance(exc, GeminiQuotaError):
+        return _error(ERR_AI_QUOTA, status.HTTP_503_SERVICE_UNAVAILABLE)
     is_busy = isinstance(exc, GeminiBusyError) or (
         isinstance(exc, errors.APIError) and getattr(exc, "code", None) in (429, 503)
     )
@@ -88,6 +99,8 @@ def upload_pdf(request):
         return _error(ERR_NO_READABLE_TEXT, status.HTTP_400_BAD_REQUEST)
     except ValueError:
         return _error(ERR_CANNOT_READ_PDF, status.HTTP_400_BAD_REQUEST)
+    except Exception as exc:
+        return handle_service_error(exc)
 
     try:
         texts = [chunk["text"] for chunk in chunks]
@@ -97,10 +110,11 @@ def upload_pdf(request):
     except Exception as exc:
         return handle_service_error(exc)
 
+    total_pages = getattr(pages, "total_pages", len(pages))
     return Response(
         {
             "message": "PDF processed successfully.",
-            "pages": len(pages),
+            "pages": total_pages,
             "chunks": len(chunks),
         },
         status=status.HTTP_200_OK,
@@ -115,8 +129,9 @@ def ask_question(request):
     Expects:
         JSON body: {"question": "..."}
     """
-    if not isinstance(request.data, dict):
-        return _error(ERR_QUESTION_REQUIRED, status.HTTP_400_BAD_REQUEST)
+    err_response = _ensure_dict_data(request.data, ERR_QUESTION_REQUIRED)
+    if err_response:
+        return err_response
 
     raw_question = request.data.get("question")
     if not isinstance(raw_question, str) or not raw_question.strip():
@@ -146,8 +161,9 @@ def generate_quiz_view(request):
     Expects:
         Optional JSON body: {"num_questions": int}
     """
-    if not isinstance(request.data, dict):
-        return _error(ERR_QUIZ_COUNT, status.HTTP_400_BAD_REQUEST)
+    err_response = _ensure_dict_data(request.data, ERR_QUIZ_COUNT)
+    if err_response:
+        return err_response
 
     if "num_questions" in request.data:
         raw_count = request.data["num_questions"]
@@ -163,9 +179,6 @@ def generate_quiz_view(request):
         num_questions = QUIZ_DEFAULT_QUESTIONS
 
     try:
-        if get_chunk_count() == 0:
-            return _error(ERR_UPLOAD_FIRST, status.HTTP_400_BAD_REQUEST)
-
         chunks = get_quiz_chunks()
         if not chunks:
             return _error(ERR_UPLOAD_FIRST, status.HTTP_400_BAD_REQUEST)
@@ -173,4 +186,4 @@ def generate_quiz_view(request):
         questions = generate_quiz(chunks, num_questions)
         return Response({"questions": questions}, status=status.HTTP_200_OK)
     except Exception as exc:
-        return handle_service_error(exc)
+        return handle_service_error(exc)

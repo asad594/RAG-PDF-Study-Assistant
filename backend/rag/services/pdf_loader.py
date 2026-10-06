@@ -14,6 +14,28 @@ class NoTextError(ValueError):
     """Raised when a PDF contains no extractable text."""
 
 
+class ExtractedPages(list):
+    """List of extracted pages preserving total page count metadata."""
+
+    def __init__(self, pages: list[dict], total_pages: int):
+        super().__init__(pages)
+        self.total_pages = total_pages
+
+
+def get_pdf_page_count(source: Union[str, Path, BinaryIO, Any]) -> int:
+    """Return the total number of pages in a PDF file."""
+    if hasattr(source, "seek"):
+        source.seek(0)
+    reader = PdfReader(source)
+    if reader.is_encrypted:
+        try:
+            if not reader.decrypt(""):
+                raise ValueError("PDF is encrypted and password protected.")
+        except Exception as exc:
+            raise ValueError(f"Could not read PDF: {exc}") from exc
+    return len(reader.pages)
+
+
 def _clean_text(text: str) -> str:
     """
     Normalize whitespace, strip, and fix simple hyphenated line breaks.
@@ -47,29 +69,28 @@ def extract_pages(source: Union[str, Path, BinaryIO, Any]) -> list[dict]:
         source: File path (str or Path) or binary file-like object (Django UploadedFile).
 
     Returns:
-        A list of dicts: [{"page": int (1-based), "text": str}, ...].
+        A list of dicts: [{"page": int (1-based), "text": str}, ...] with total_pages attribute.
 
     Raises:
         NoTextError: If no page has extractable text.
         ValueError: If the file is encrypted, invalid, or corrupted.
     """
-    # Reset stream position if source is a file-like object
     if hasattr(source, "seek"):
         source.seek(0)
 
     try:
-        try:
-            reader = PdfReader(source)
-            if reader.is_encrypted:
+        reader = PdfReader(source)
+        if reader.is_encrypted:
+            try:
+                decrypted = reader.decrypt("")
+            except Exception as err:
+                logger.exception("Failed to decrypt PDF: %s", err)
+                raise ValueError("PDF is encrypted and password protected.") from err
+            if not decrypted:
                 raise ValueError("PDF is encrypted and password protected.")
-            pages = reader.pages
-            total_pages = len(pages)
-        except ValueError:
-            raise
-        except Exception as err:
-            logger.exception("Failed to open PDF file: %s", err)
-            raise ValueError(f"Could not read PDF: {err}") from err
 
+        pages = reader.pages
+        total_pages = len(pages)
         if total_pages == 0:
             raise ValueError("The PDF contains no pages.")
 
@@ -88,9 +109,9 @@ def extract_pages(source: Union[str, Path, BinaryIO, Any]) -> list[dict]:
         if not extracted_pages:
             raise NoTextError("No extractable text found in the PDF (pages may be scanned or empty).")
 
-        return extracted_pages
+        return ExtractedPages(extracted_pages, total_pages=total_pages)
     except (NoTextError, ValueError):
         raise
     except Exception as err:
-        logger.exception("Unexpected error while processing PDF: %s", err)
+        logger.exception("Failed to open PDF file: %s", err)
         raise ValueError(f"Could not read PDF: {err}") from err

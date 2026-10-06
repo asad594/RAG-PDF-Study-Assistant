@@ -10,22 +10,37 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load backend/.env once at the top
+_env_path = BASE_DIR / ".env"
+if _env_path.exists():
+    load_dotenv(dotenv_path=_env_path)
+else:
+    load_dotenv()
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-d2)t)!5o6$^ovl%z7oa#m&ff3#a6%l-$bxh1#v5bwb#o^(iz%6'
+SECRET_KEY = os.getenv(
+    'DJANGO_SECRET_KEY',
+    'django-insecure-d2)t)!5o6$^ovl%z7oa#m&ff3#a6%l-$bxh1#v5bwb#o^(iz%6',
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+_debug_env = os.getenv('DJANGO_DEBUG', 'True').strip().lower()
+DEBUG = _debug_env not in ('false', '0')
 
-ALLOWED_HOSTS = []
+_allowed_hosts_env = os.getenv('DJANGO_ALLOWED_HOSTS', '').strip()
+ALLOWED_HOSTS = [h.strip() for h in _allowed_hosts_env.split(',') if h.strip()] if _allowed_hosts_env else []
 
 
 # Application definition
@@ -129,10 +144,8 @@ MAILERS = {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
     },
 }
-import os
-from dotenv import load_dotenv
 
-load_dotenv()
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-CORS_ALLOWED_ORIGINS = ["http://localhost:5173"]
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
