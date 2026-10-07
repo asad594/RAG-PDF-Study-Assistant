@@ -1,22 +1,32 @@
-# Python
+# Python & Virtual Environments
 venv/
+.venv/
+env/
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 db.sqlite3
 
-# Secrets
+# Environment & Secrets
 .env
+*.env
+!.env.example
 
-# RAG data
+# Vector Store & Uploaded Files
 chroma_db/
+backend/chroma_db/
 media/
+uploads/
+*.pdf
 
-# Node
+# Node & Frontend Build
 node_modules/
 dist/
+dist-ssr/
+*.local
 
-# OS / editor
+# Editor & OS
 .DS_Store
 .vscode/
-
-backend/chroma_db/
+.idea/
+Thumbs.db

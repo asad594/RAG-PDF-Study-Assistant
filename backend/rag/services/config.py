@@ -50,7 +50,9 @@ def get_generation_model() -> str:
 EMBEDDING_BATCH_SIZE = 100
 
 # Vector store settings
-CHROMA_PATH = Path(__file__).resolve().parent.parent.parent / "chroma_db"
+_default_chroma_path = Path(__file__).resolve().parent.parent.parent / "chroma_db"
+_chroma_dir_env = os.getenv("CHROMA_DIR", "").strip()
+CHROMA_PATH = Path(_chroma_dir_env) if _chroma_dir_env else _default_chroma_path
 COLLECTION_NAME = "pdf_chunks"
 DEFAULT_TOP_K = 4
 

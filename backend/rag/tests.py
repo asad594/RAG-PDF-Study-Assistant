@@ -601,3 +601,17 @@ class ConfigModelTests(SilentTestCase):
             self.assertIs(type(model_arg), str)
             self.assertTrue(len(model_arg) > 0)
             self.assertEqual(model_arg, "text-embedding-004")
+
+
+class HealthCheckTests(TestCase):
+    def test_health_check_endpoint(self):
+        client = APIClient()
+        response = client.get("/health/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+
+    def test_api_health_check_endpoint(self):
+        client = APIClient()
+        response = client.get("/api/health/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})

@@ -191,3 +191,9 @@ def generate_quiz_view(request):
         return Response({"questions": questions}, status=status.HTTP_200_OK)
     except Exception as exc:
         return handle_service_error(exc)
+
+
+@api_view(["GET"])
+def health_check(request):
+    """Health check endpoint returning JSON {'status': 'ok'}."""
+    return Response({"status": "ok"}, status=status.HTTP_200_OK)

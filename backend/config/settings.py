@@ -31,16 +31,36 @@ else:
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv(
-    'DJANGO_SECRET_KEY',
-    'django-insecure-d2)t)!5o6$^ovl%z7oa#m&ff3#a6%l-$bxh1#v5bwb#o^(iz%6',
+    'SECRET_KEY',
+    os.getenv(
+        'DJANGO_SECRET_KEY',
+        'django-insecure-d2)t)!5o6$^ovl%z7oa#m&ff3#a6%l-$bxh1#v5bwb#o^(iz%6',
+    ),
 )
 
 # SECURITY WARNING: don't run with debug turned on in production!
-_debug_env = os.getenv('DJANGO_DEBUG', 'True').strip().lower()
-DEBUG = _debug_env not in ('false', '0')
+_debug_raw = os.getenv('DEBUG', os.getenv('DJANGO_DEBUG', '')).strip().lower()
+if _debug_raw in ('true', '1', 'yes'):
+    DEBUG = True
+elif _debug_raw in ('false', '0', 'no'):
+    DEBUG = False
+else:
+    # Default to False in production (e.g. Railway), True for local development
+    DEBUG = not bool(os.getenv('RAILWAY_ENVIRONMENT') or os.getenv('RAILWAY_PROJECT_ID'))
 
-_allowed_hosts_env = os.getenv('DJANGO_ALLOWED_HOSTS', '').strip()
-ALLOWED_HOSTS = [h.strip() for h in _allowed_hosts_env.split(',') if h.strip()] if _allowed_hosts_env else []
+_allowed_hosts_env = os.getenv('ALLOWED_HOSTS', os.getenv('DJANGO_ALLOWED_HOSTS', '')).strip()
+if _allowed_hosts_env:
+    ALLOWED_HOSTS = [h.strip() for h in _allowed_hosts_env.split(',') if h.strip()]
+else:
+    ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+
+for _railway_domain in ['.railway.app', '.up.railway.app']:
+    if _railway_domain not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(_railway_domain)
+
+_railway_public_domain = os.getenv('RAILWAY_PUBLIC_DOMAIN', '').strip()
+if _railway_public_domain and _railway_public_domain not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(_railway_public_domain)
 
 
 # Application definition
@@ -145,10 +165,24 @@ MAILERS = {
     },
 }
 
-CORS_ALLOWED_ORIGINS = [
+_default_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
+
+_cors_env = os.getenv('CORS_ALLOWED_ORIGINS', '').strip()
+if _cors_env:
+    CORS_ALLOWED_ORIGINS = list(dict.fromkeys(_default_origins + [o.strip() for o in _cors_env.split(',') if o.strip()]))
+else:
+    CORS_ALLOWED_ORIGINS = _default_origins
+
+_csrf_env = os.getenv('CSRF_TRUSTED_ORIGINS', '').strip()
+if _csrf_env:
+    CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(_default_origins + [o.strip() for o in _csrf_env.split(',') if o.strip()]))
+elif _cors_env:
+    CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
+else:
+    CSRF_TRUSTED_ORIGINS = _default_origins
 
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": [

@@ -1,4 +1,5 @@
-const BASE_PATH = '/api'
+const RAW_URL = (import.meta.env.VITE_API_URL ?? 'http://localhost:8000').trim().replace(/\/+$/, '')
+const BASE_PATH = RAW_URL ? (RAW_URL.endsWith('/api') ? RAW_URL : `${RAW_URL}/api`) : '/api'
 
 export const REQUEST_TIMEOUT_MS = 120000
 export const MAX_UPLOAD_MB = 10
